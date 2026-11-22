@@ -1,0 +1,111 @@
+name: iOS simulator build (fork)
+
+# Fork-only workflow: builds an unsigned iOS simulator app, no upstream secrets needed.
+# Run it from the Actions tab or: gh workflow run ios-simulator-build.yml -f ref=<branch>
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA of this fork to build
+        required: true
+        default: develop
+      configuration:
+        description: Release bundles the JS into the app; Debug needs a Metro server
+        type: choice
+        options: [Release, Debug]
+        default: Release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-sim-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: '26.6'
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@7372622e62b60b3cb750dcd2b9e32c247ffec26a # v1.302.0
+        with:
+          ruby-version: 2.7.7
+          bundler-cache: true
+
+      - name: Cache CocoaPods
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+          key: fork-pods-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock', 'ios/Podfile') }}
+          restore-keys: fork-pods-${{ runner.os }}-
+
+      - name: pod install
+        run: pnpm pod-install
+
+      - name: Build simulator app
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -workspace RocketChat.xcworkspace \
+            -scheme RocketChat \
+            -configuration "${{ inputs.configuration }}" \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            build > xcodebuild.log 2>&1 || {
+              grep -E "error:" xcodebuild.log | sort -u | head -50
+              tail -100 xcodebuild.log
+              exit 1
+            }
+          tail -5 xcodebuild.log
+
+      - name: Zip app
+        run: |
+          APP=$(find ios/build/Build/Products -maxdepth 2 -name "*.app" -path "*iphonesimulator*" | head -n 1)
+          echo "Built: $APP"
+          ditto -c -k --keepParent "$APP" Rocket.Chat-simulator.zip
+
+      - name: Upload simulator app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-simulator-app-${{ inputs.configuration }}
+          path: Rocket.Chat-simulator.zip
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: xcodebuild-log
+          path: ios/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7

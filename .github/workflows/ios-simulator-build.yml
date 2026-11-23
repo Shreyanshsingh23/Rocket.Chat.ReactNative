@@ -1,6 +1,7 @@
-name: iOS simulator build (fork)
+name: Fork CI (checks + iOS simulator build)
 
-# Fork-only workflow: builds an unsigned iOS simulator app, no upstream secrets needed.
+# Fork-only workflow: lint/format/tsc/jest like upstream's "Run Lint and Test", plus an
+# unsigned iOS simulator build. No upstream secrets needed.
 # Run it from the Actions tab or: gh workflow run ios-simulator-build.yml -f ref=<branch>
 
 on:
@@ -15,16 +16,55 @@ on:
         type: choice
         options: [Release, Debug]
         default: Release
+      ios:
+        description: Also run the iOS simulator build (~30 min)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: ios-sim-${{ inputs.ref }}
+  group: fork-ci-${{ inputs.ref }}
   cancel-in-progress: true
 
 jobs:
+  checks:
+    name: Lint, format, tsc, jest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Node and install
+        id: setup
+        uses: ./.github/actions/setup-node
+
+      - name: Oxlint
+        run: pnpm exec oxlint
+
+      - name: Format check (oxfmt)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: pnpm exec oxfmt --check
+
+      - name: TypeScript
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: pnpm exec tsc
+
+      - name: Jest
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: pnpm test
+
+      - name: Validate test-map freshness
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: node .github/scripts/validate-test-map.js
+
   build:
+    name: iOS simulator build
+    if: ${{ inputs.ios }}
     runs-on: macos-26
     timeout-minutes: 90
     steps:
